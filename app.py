@@ -1,27 +1,28 @@
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
-from langchain_google_genai import ChatGoogleGenerativeAI
-import google.generativeai as genai
-
-from langchain.prompts import PromptTemplate
-from langchain.chains import LLMChain
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_community.vectorstores import FAISS
 from langchain_community.utilities import SerpAPIWrapper
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 
 import streamlit as st
 from dotenv import load_dotenv
 import emoji
-
 import os
 from itertools import zip_longest
 
+# Import Google's genai and types directly
+from google import genai
+from google.genai import types
 
 load_dotenv()
-
-genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
-
+embeddings = GoogleGenerativeAIEmbeddings(
+    model="models/embedding-001",
+    GOOGLE_API_KEY=os.getenv("GOOGLE_API_KEY"),  # Or GEMINI_API_KEY depending on your .env
+)
+# Initialize the Gemini API client - using your reference approach
+client = genai.Client(
+    api_key=os.getenv("GOOGLE_API_KEY"),  # or GEMINI_API_KEY depending on your .env file
+)
 
 st.title(f"Career Advisor Chatbot {emoji.emojize(':robot:')}")
 
@@ -50,62 +51,78 @@ if "pdf_texts" not in st.session_state:
             st.session_state["vectors"] = vectors
     st.success("Database creation completed!")
 
-def get_response(history,user_message,temperature=0):
-
-    DEFAULT_TEMPLATE = """The following is a friendly conversation between a human and an Career Advisor. The Advisor guides the user regaring jobs,interests and other domain selection decsions.
-    It follows the previous conversation to do so
+def get_response(history, user_message):
+    # Get relevant documents from vector store
+    docs = st.session_state["vectors"].similarity_search(user_message)
+    doc_text = " ".join([doc.page_content for doc in docs])
+    
+    # Get web search results
+    params = {
+        "engine": "bing",
+        "gl": "us",
+        "hl": "en",
+    }
+    search = SerpAPIWrapper(params=params)
+    web_knowledge = search.run(user_message)
+    
+    # Create prompt content
+    prompt = f"""The following is a friendly conversation between a human and a Career Advisor. The Advisor guides the user regarding jobs, interests and other domain selection decisions.
+    It follows the previous conversation to do so.
 
     Relevant pieces of previous conversation:
-    {context},
+    {history}
 
     Useful information from career guidance books:
-    {text}, 
+    {doc_text}
 
     Useful information about career guidance from Web:
-    {web_knowledge},
+    {web_knowledge}
 
     Current conversation:
-    Human: {input}
+    Human: {user_message}
     Career Expert:"""
-
-    PROMPT = PromptTemplate(
-        input_variables=['context','input','text','web_knowledge'], template=DEFAULT_TEMPLATE
+    
+    # Create content structure following your reference
+    contents = [
+        types.Content(
+            role="user",
+            parts=[
+                types.Part.from_text(text=prompt),
+            ],
+        ),
+    ]
+    
+    # Setup generation config
+    generate_content_config = types.GenerateContentConfig(
+        response_mime_type="text/plain",
     )
-    docs = st.session_state["vectors"].similarity_search(user_message)
-
-
-    params = {
-    "engine": "bing",
-    "gl": "us",
-    "hl": "en",
-    }
-
-    search = SerpAPIWrapper(params=params)
-
-    web_knowledge=search.run(user_message)
-
-
-    gemini_model = ChatGoogleGenerativeAI(model="gemini-pro", temperature=temperature)
-
-    conversation_with_summary = LLMChain(
-        llm=gemini_model,
-        prompt=PROMPT,
-        verbose=False
-    )
-    response = conversation_with_summary.predict(context=history,input=user_message,web_knowledge=web_knowledge,text = docs)
-    return response
+    
+    # Use the model directly with the client - Update the model name as needed
+    model = "gemini-2.0-flash"  # or use "gemini-2.5-pro-preview-03-25" if available to you
+    
+    # For Streamlit, we need to collect the full response rather than streaming directly
+    full_response = ""
+    
+    for chunk in client.models.generate_content_stream(
+        model=model,
+        contents=contents,
+        config=generate_content_config,
+    ):
+        if chunk.text:
+            full_response += chunk.text
+    
+    return full_response
 
 # Function to get conversation history
 def get_history(history_list):
     history = ''
     for message in history_list:
-        if message['role']=='user':
-            history = history+'input '+message['content']+'\n'
-        elif message['role']=='assistant':
-            history = history+'output '+message['content']+'\n'
+        if message['role'] == 'user':
+            history = history + 'input ' + message['content'] + '\n'
+        elif message['role'] == 'assistant':
+            history = history + 'output ' + message['content'] + '\n'
     
     return history
-
 
 # Streamlit UI
 def get_text():
@@ -134,7 +151,7 @@ if user_input:
 
     formatted_history = get_history(combined_history)
 
-    output = get_response(formatted_history,user_input)
+    output = get_response(formatted_history, user_input)
 
     st.session_state.past.append(user_input)
     st.session_state.generated.append(output)
@@ -144,10 +161,3 @@ with st.expander("Chat History", expanded=True):
         for i in range(len(st.session_state["generated"])):
             st.markdown(emoji.emojize(f":speech_balloon: **User {str(i)}**: {st.session_state['past'][i]}"))
             st.markdown(emoji.emojize(f":robot: **Assistant {str(i)}**: {st.session_state['generated'][i]}"))
-
-
-# what factors should I keep in mind before deciding a career?
-
-# What are the growing sectors of global economy ?
-
-# If I decide to be a software engineer what would My salary be ?
